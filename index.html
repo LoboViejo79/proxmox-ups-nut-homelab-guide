@@ -1,0 +1,218 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Manual público y reproducible: Proxmox + Hikvision DS-UPS2000-R + NUT, apagado seguro sin killpower."><title>Manual HomeLab · Proxmox + UPS + NUT</title><link rel="stylesheet" href="assets/styles.css"></head><body>
+<div class="progress" id="progress"></div><div class="mobile"><strong>Manual UPS + Proxmox</strong><button id="menu">☰ Índice</button></div>
+<div class="layout"><aside class="side" id="side"><div class="brand"><img src="assets/icons/proxmox-light.svg" alt="Proxmox"><div><strong>UPS + Proxmox + NUT</strong><small>Edición pública anonimizada</small></div></div><input class="search" id="search" placeholder="Buscar en todo el manual…"><nav class="nav">
+<div class="navGroup">Fundamentos</div><a href="#inicio">1. Qué resuelve</a><a href="#arquitectura">2. Arquitectura</a><a href="#eventos">3. Qué ocurre en un corte</a><a href="#seguridad">4. Seguridad</a><a href="#glosario">5. Glosario</a>
+<div class="navGroup">Instalación</div><a href="#prereq">6. Prerrequisitos</a><a href="#usb">7. Detectar UPS</a><a href="#nutbase">8. NUT base</a><a href="#udev">9. Permisos USB</a><a href="#servicios">10. Servicios systemd</a><a href="#metricas">11. Ver métricas</a>
+<div class="navGroup">Automatización</div><a href="#auth">12. Usuario NUT</a><a href="#simular">13. Shutdown simulado</a><a href="#scheduler">14. upssched</a><a href="#script">15. Script de decisión</a><a href="#proxmox">16. Orden Proxmox</a><a href="#produccion">17. Activar producción</a><a href="#nokill">18. No apagar UPS</a>
+<div class="navGroup">Pruebas y operación</div><a href="#pruebas">19. Plan de pruebas</a><a href="#fsd">20. FSD controlado</a><a href="#diagnostico">21. Troubleshooting</a><a href="#mantenimiento">22. Mantenimiento</a><a href="#reinicio">23. Retorno de energía</a><a href="#archivos">24. Archivos incluidos</a><a href="#privacidad">25. Privacidad GitHub</a><a href="#referencias">26. Referencias</a>
+</nav></aside><div class="main"><header class="hero"><div class="heroGrid"><div><div class="eyebrow">HomeLab · continuidad eléctrica · edición GitHub</div><h1>Apagado seguro de Proxmox con una UPS Hikvision DS-UPS2000-R y NUT</h1><p class="lead">Guía completa, paso a paso y pensada para poder replicarse: la UPS alimenta el rack durante un corte, NUT espera 180 segundos, cancela el apagado si vuelve la energía y, si el corte continúa, ordena detener VM/LXC y apagar Proxmox <strong>sin enviar killpower a la UPS</strong>.</p><div class="pills"><span class="pill">NUT 2.8.1 observado</span><span class="pill">USB HID 0463:0001</span><span class="pill">usbhid-ups</span><span class="pill">Timer 180 s</span><span class="pill">LOWBATT inmediato</span><span class="pill">Sin POWERDOWNFLAG</span></div><div class="callout ok"><strong>🤝 Tutorial creado para ayudar a la comunidad</strong>Este tutorial fue creado con el objetivo de ayudar a la comunidad, compartir conocimiento y facilitar que cualquier persona pueda comprender e implementar esta solución en su propio Homelab. Gracias por acompañar este proyecto y por seguirme en mis redes sociales.<div class="downloads" style="margin-top:12px"><a href="https://www.youtube.com/@LoboViejo79" target="_blank" rel="noopener noreferrer">▶️ YouTube · @LoboViejo79</a><a href="https://www.tiktok.com/@loboviejo79" target="_blank" rel="noopener noreferrer">🎵 TikTok · @loboviejo79</a></div></div></div><img class="heroLogo" src="assets/icons/proxmox-light.svg" alt=""></div></header><main class="content">
+
+<section class="section" id="inicio"><h2>1. Qué problema resuelve este diseño</h2><p>Una UPS por sí sola sólo mantiene los equipos encendidos durante un tiempo. El problema aparece cuando la batería se agota: si el hypervisor y sus máquinas siguen escribiendo datos, el corte final se parece a desenchufar el servidor. Este diseño transforma ese tiempo de batería en una <strong>ventana controlada de apagado</strong>.</p><div class="grid"><article class="card"><div class="kpi">180 s</div><h3>Tolerancia a microcortes</h3><p>Durante los primeros tres minutos el servidor sigue trabajando. Si la red vuelve antes del umbral, el temporizador se cancela.</p></article><article class="card"><div class="kpi">OB → FSD</div><h3>Decisión verificada</h3><p>Al vencer el timer se vuelve a consultar <code>ups.status</code>. Sólo si continúa en batería se solicita FSD.</p></article><article class="card"><div class="kpi">0</div><h3>Killpower</h3><p>La política deliberada es apagar Proxmox, pero dejar la UPS alimentando otros equipos esenciales.</p></article></div><div class="callout ok"><strong>Idea central</strong>El objetivo no es “apagar todo cuanto antes”, sino proteger la integridad de datos y servicios sin desperdiciar batería en cortes breves.</div></section>
+
+<section class="section" id="arquitectura"><h2>2. Arquitectura recomendada</h2><p>NUT se ejecuta directamente en el nodo Proxmox. La conexión USB no se pasa a una VM ni a un LXC: el propio hypervisor conserva la autoridad de apagado incluso si un guest falla.</p><div class="diagram"><div class="flow"><div class="node"><div>⚡<br><strong>Red eléctrica</strong><br><small>AC de entrada</small></div></div><div class="arrow"></div><div class="node"><div>🔋<br><strong>DS-UPS2000-R</strong><br><small>USB HID → nodo Proxmox</small></div></div><div class="arrow"></div><div class="node"><div>🖥️<br><strong>nodo-proxmox</strong><br><small>driver → upsd → upsmon → upssched</small></div></div></div><div style="height:16px"></div><div class="flow"><div class="node"><div>🌐<br><strong>Router / switch / AP</strong><br><small>siguen conectados a la UPS</small></div></div><div class="arrow"></div><div class="node"><div>📦<br><strong>VM / LXC</strong><br><small>apagado ordenado por Proxmox</small></div></div><div class="arrow"></div><div class="node"><div>💾<br><strong>VM de almacenamiento</strong><br><small>última entre los guests</small></div></div></div></div><p class="muted">En esta edición pública el hostname real fue reemplazado por <code>nodo-proxmox</code> y el inventario interno se expresa con roles genéricos.</p></section>
+
+<section class="section" id="eventos"><h2>3. Simular qué ocurre durante un corte</h2><p>Este simulador es didáctico: acelera 180 segundos para mostrar la lógica sin ejecutar ningún comando real.</p><div class="diagram"><div class="flow"><div class="node" id="mains"><strong>Red AC</strong></div><div class="arrow" id="a1"></div><div class="node" id="ups"><strong>UPS</strong></div><div class="arrow" id="a2"></div><div class="node" id="host"><strong>nodo-proxmox</strong></div></div><div class="controls"><button class="btn ok" id="normal">Normal</button><button class="btn danger" id="outage">Simular corte</button><button class="btn" id="restore">Restaurar red</button><button class="btn danger" id="fsd">Mostrar FSD</button></div><p><strong id="simstate">OL</strong> · contador: <span id="counter">0 s</span></p><div class="statusbox" id="simlog"></div></div><h3>Secuencia real conceptual</h3><div class="timeline"><div class="time">t = 0 s</div><div class="event"><strong>ONBATT</strong>: la UPS pasa a batería; <code>upssched</code> inicia <code>onbatt-long</code>.</div><div class="time">0–179 s</div><div class="event">Proxmox y los servicios siguen operativos. Si aparece <strong>ONLINE</strong>, el timer se cancela.</div><div class="time">t = 180 s</div><div class="event">El script consulta <code>upsc ups-rack@localhost ups.status</code>.</div><div class="time">Si sigue OB</div><div class="event"><code>upsmon -c fsd</code> inicia el apagado coordinado.</div><div class="time">FSD</div><div class="event"><code>pve-guests</code> detiene guests en el orden inverso de startup y luego <code>systemctl poweroff</code> apaga el host.</div><div class="time">Después</div><div class="event">La UPS permanece encendida. La red y otros dispositivos pueden continuar con batería.</div></div></section>
+
+<section class="section" id="seguridad"><h2>4. Seguridad antes de tocar la configuración</h2><div class="callout danger"><strong>Comandos destructivos</strong><code>upsmon -c fsd</code>, <code>systemctl poweroff</code>, <code>qm stop</code> y cualquier mecanismo de killpower pueden apagar equipos reales. No se deben usar como comandos de consulta.</div><p>La forma segura de implementar esto es por fases. Primero lectura, después autenticación, luego simulación de shutdown, después temporizador y sólo al final se reemplaza el shutdown simulado por el <code>poweroff</code> real.</p><div class="callout warn"><strong>Lección práctica</strong>No pegues líneas sueltas extraídas del interior de un bloque <code>case ... esac</code>. Una línea como <code>/usr/sbin/upsmon -c fsd</code> se ejecuta por sí sola aunque el resto del fragmento produzca errores de sintaxis.</div><h3>Reglas para una prueba segura</h3><ul><li>Tener acceso físico o consola fuera de banda antes de probar apagados.</li><li>Hacer backup de <code>/etc/nut</code>.</li><li>Confirmar que el shutdown inicial apunta al script de simulación.</li><li>No usar <code>upsdrvctl shutdown</code> en este diseño.</li><li>Realizar la prueba real en una ventana de mantenimiento.</li></ul></section>
+
+<section class="section" id="glosario"><h2>5. Glosario</h2><input class="search" id="glossarySearch" placeholder="Filtrar términos…" style="max-width:420px;margin-bottom:14px"><dl class="glossary"><div class="term"><dt>NUT</dt><dd>Network UPS Tools: suite que comunica el sistema operativo con UPS/SAI.</dd></div><div class="term"><dt>UPS / SAI</dt><dd>Sistema de alimentación ininterrumpida.</dd></div><div class="term"><dt>usbhid-ups</dt><dd>Driver NUT para dispositivos USB HID compatibles.</dd></div><div class="term"><dt>upsd</dt><dd>Servidor de NUT que publica variables y recibe clientes autorizados.</dd></div><div class="term"><dt>upsc</dt><dd>Cliente de consulta para leer variables de una UPS publicada por upsd.</dd></div><div class="term"><dt>upsmon</dt><dd>Monitor que interpreta el estado eléctrico y puede iniciar el shutdown.</dd></div><div class="term"><dt>upssched</dt><dd>Programador de acciones y temporizadores asociado a eventos de upsmon.</dd></div><div class="term"><dt>OL</dt><dd><em>On Line</em>: hay red eléctrica.</dd></div><div class="term"><dt>OB</dt><dd><em>On Battery</em>: la carga está siendo alimentada por batería.</dd></div><div class="term"><dt>LOWBATT</dt><dd>Estado crítico de batería. En esta política solicita FSD inmediatamente.</dd></div><div class="term"><dt>FSD</dt><dd><em>Forced Shutdown</em>: señal coordinada de NUT para iniciar apagado.</dd></div><div class="term"><dt>POWERDOWNFLAG</dt><dd>Bandera que puede participar en la fase de cortar energía de la UPS. Aquí se omite deliberadamente.</dd></div><div class="term"><dt>sdorder=-1</dt><dd>Configuración usada para excluir esta UPS de una secuencia de shutdown del driver.</dd></div><div class="term"><dt>pve-guests</dt><dd>Servicio Proxmox que arranca/detiene los guests del nodo.</dd></div><div class="term"><dt>startup order</dt><dd>Orden de inicio configurado por guest. El apagado se realiza en orden inverso.</dd></div><div class="term"><dt>QEMU Guest Agent</dt><dd>Agente dentro de una VM que permite a Proxmox coordinar acciones y consultar su estado.</dd></div><div class="term"><dt>udev</dt><dd>Subsistema Linux que aplica permisos/reglas a dispositivos cuando aparecen.</dd></div><div class="term"><dt>systemd</dt><dd>Gestor de servicios usado por Proxmox/Debian para NUT y el propio apagado.</dd></div></dl></section>
+
+<section class="section" id="prereq"><h2>6. Prerrequisitos</h2><div class="grid"><article class="card w6"><img class="cardIcon" src="assets/icons/proxmox-light.svg"><h3>Proxmox/Debian</h3><p>Acceso root, systemd operativo y una ventana de mantenimiento para la prueba final.</p></article><article class="card w6"><h3>UPS por USB</h3><p>Hikvision DS-UPS2000-R conectada directamente al host. En el laboratorio se identificó como <code>0463:0001 MGE UPS Systems UPS</code>.</p></article></div><div class="codeWrap"><div class="codeTitle">Instalar paquetes</div><pre><code>apt update
+apt install -y nut nut-client nut-server usbutils</code></pre></div><p><strong>Por qué:</strong> <code>nut-server</code> aporta <code>upsd</code>; <code>nut-client</code> contiene herramientas como <code>upsc</code>/<code>upsmon</code>; <code>usbutils</code> aporta <code>lsusb</code>.</p><h3>Backup antes de empezar</h3><div class="codeWrap"><pre><code>mkdir -p /root/backup-nut
+cp -a /etc/nut /root/backup-nut/nut-$(date +%F-%H%M%S)</code></pre></div></section>
+
+<section class="section" id="usb"><h2>7. Paso 1 — detectar la UPS por USB</h2><div class="steps"><div class="step"><strong>Enumerar dispositivos.</strong><div class="codeWrap"><pre><code>lsusb</code></pre></div>Busca una línea similar a <code>ID 0463:0001 MGE UPS Systems UPS</code>.</div><div class="step"><strong>Pedir a NUT que sugiera driver.</strong><div class="codeWrap"><pre><code>nut-scanner -U</code></pre></div>El resultado observado propuso <code>driver = "usbhid-ups"</code>, <code>vendorid = "0463"</code> y <code>productid = "0001"</code>.</div><div class="step"><strong>Verificar el kernel.</strong><div class="codeWrap"><pre><code>dmesg -T | grep -Ei 'usb|hid|ups' | tail -n 100</code></pre></div>Sirve para comprobar que el dispositivo HID aparece y que el problema no está en el cable/puerto.</div></div><div class="callout"><strong>Mensajes auxiliares de nut-scanner</strong>Advertencias por módulos SNMP/XML/IPMI ausentes no impiden este escenario USB local si el escaneo USB funciona.</div></section>
+
+<section class="section" id="nutbase"><h2>8. Paso 2 — configuración base de NUT</h2><h3><code>/etc/nut/ups.conf</code></h3><div class="codeWrap"><pre><code>maxretry = 3
+
+[ups-rack]
+    driver = usbhid-ups
+    port = auto
+    vendorid = 0463
+    productid = 0001
+    sdorder = -1
+    desc = "Hikvision DS-UPS2000-R Rack"</code></pre></div><p><strong>Qué significa cada línea:</strong> <code>driver</code> selecciona el controlador; <code>port=auto</code> evita fijar un número de bus USB que puede cambiar; vendor/product limitan el dispositivo esperado; <code>sdorder=-1</code> refuerza la política de no cortar la UPS.</p><h3><code>/etc/nut/nut.conf</code></h3><div class="codeWrap"><pre><code>MODE=standalone</code></pre></div><p>En <em>standalone</em>, driver, servidor NUT y monitor viven en la misma máquina. Para este caso es más simple y reduce dependencias externas.</p></section>
+
+<section class="section" id="udev"><h2>9. Paso 3 — permisos USB y udev</h2><p>Un error típico es:</p><div class="codeWrap"><pre><code>libusb1: Could not open any HID devices: insufficient permissions on everything
+No matching HID UPS found</code></pre></div><p>Antes de inventar reglas nuevas, verifica las que ya instala el paquete:</p><div class="codeWrap"><pre><code>grep -Ri '0463' /usr/lib/udev/rules.d/ /etc/udev/rules.d/ 2>/dev/null</code></pre></div><p>En el laboratorio ya existía una regla que asociaba <code>0463:0001</code> al grupo <code>nut</code>. Se recargó así:</p><div class="codeWrap"><pre><code>udevadm control --reload-rules
+udevadm trigger --subsystem-match=usb --action=change
+sleep 3
+lsusb | grep 0463</code></pre></div><p>Para comprobar el nodo concreto de dispositivo puedes usar <code>ls -l /dev/bus/usb/BBB/DDD</code> después de localizarlo con <code>lsusb</code>. El resultado esperado es grupo <code>nut</code>.</p><div class="callout warn"><strong>No hardcodear /dev/bus/usb/001/005</strong>Los números de bus/dispositivo cambian al reconectar o reiniciar. Por eso NUT usa <code>port=auto</code> y los IDs USB.</div></section>
+
+<section class="section" id="servicios"><h2>10. Paso 4 — iniciar el driver y servicios systemd</h2><p>En la instalación original, <code>upsdrvsvcctl list</code> no enumeró correctamente la instancia aunque systemd sí la conocía. Se administró directamente la unidad:</p><div class="codeWrap"><pre><code>systemctl reset-failed nut-driver@ups-rack.service
+systemctl start nut-driver@ups-rack.service
+systemctl status nut-driver@ups-rack.service --no-pager -l</code></pre></div><p>Mensajes de éxito observados:</p><div class="codeWrap"><pre><code>Using subdriver: MGE HID 1.46
+Network UPS Tools - Generic HID driver 0.52 (2.8.1)
+USB communication driver (libusb 1.0)
+usbhid-ups: Startup successful
+Active: active (running)</code></pre></div><h3>Publicar datos con upsd</h3><div class="codeWrap"><pre><code>systemctl restart nut-server
+systemctl status nut-server --no-pager -l
+upsc -l localhost
+upsc ups-rack@localhost ups.status</code></pre></div></section>
+
+<section class="section" id="metricas"><h2>11. Paso 5 — interpretar las métricas</h2><div class="table"><table><thead><tr><th>Variable</th><th>Qué indica</th><th>Uso recomendado</th></tr></thead><tbody><tr><td><code>battery.charge</code></td><td>Porcentaje estimado de batería</td><td>Observación/alertas, no única condición de shutdown.</td></tr><tr><td><code>battery.runtime</code></td><td>Segundos estimados de autonomía</td><td>Útil como referencia; puede no estar perfectamente calibrado.</td></tr><tr><td><code>input.voltage</code></td><td>Tensión de entrada</td><td>Diagnóstico de red eléctrica.</td></tr><tr><td><code>output.voltage</code></td><td>Tensión entregada por la UPS</td><td>Diagnóstico.</td></tr><tr><td><code>ups.load</code></td><td>Carga porcentual de la UPS</td><td>Dimensionamiento.</td></tr><tr><td><code>ups.status</code></td><td>OL / OB / FSD y flags adicionales</td><td>Variable crítica para decidir.</td></tr></tbody></table></div><div class="callout warn"><strong>Por qué se eligió tiempo real y no runtime</strong>En las pruebas la autonomía reportada se movía de forma muy lineal con el porcentaje de batería. Para evitar depender de una estimación, la política principal se basa en 180 segundos reales en OB y usa LOWBATT como emergencia.</div><h3>Visualización opcional con ProxMenux</h3><p>Si ProxMenux está instalado, puede mostrar el estado de NUT sin tener que montar Grafana.</p><img class="shot" src="assets/img/proxmenux-ups-public.png" alt="Panel UPS de ProxMenux sin datos identificativos"><p class="muted">Esta es la única captura original incluida porque no expone el hostname ni el inventario del servidor.</p></section>
+
+<section class="section" id="auth"><h2>12. Paso 6 — crear el usuario interno de monitoreo</h2><p>NUT necesita una credencial local para que <code>upsmon</code> se autentique contra <code>upsd</code>. No reutilices la contraseña de root ni la de la interfaz web.</p><div class="codeWrap"><pre><code>MONPASS="$(openssl rand -hex 24)"
+printf '%s\n' '[upsmon]' \
+  "    password = $MONPASS" \
+  '    upsmon primary' \
+  > /etc/nut/upsd.users
+chmod 640 /etc/nut/upsd.users
+chown root:nut /etc/nut/upsd.users</code></pre></div><div class="callout"><strong>Importante</strong>Guarda esa contraseña temporalmente para colocar exactamente el mismo valor en la línea <code>MONITOR</code> de <code>upsmon.conf</code>. El ZIP público contiene únicamente <code>&lt;PASSWORD_UPSMON&gt;</code>.</div></section>
+
+<section class="section" id="simular"><h2>13. Paso 7 — configurar un shutdown simulado</h2><p>Antes de permitir un poweroff real, crea un script que sólo escriba en el journal.</p><div class="codeWrap"><pre><code>cat > /usr/local/sbin/nut-shutdown-sim.sh <<'EOF'
+#!/bin/sh
+logger -t NUT-SIM "SIMULACION: NUT habria iniciado el apagado de Proxmox"
+exit 0
+EOF
+chown root:nut /usr/local/sbin/nut-shutdown-sim.sh
+chmod 750 /usr/local/sbin/nut-shutdown-sim.sh</code></pre></div><h3><code>upsmon.conf</code> — fase de laboratorio</h3><div class="codeWrap"><pre><code>RUN_AS_USER nut
+MONITOR ups-rack@localhost 1 upsmon <PASSWORD_UPSMON> primary
+MINSUPPLIES 1
+SHUTDOWNCMD "/usr/local/sbin/nut-shutdown-sim.sh"
+POLLFREQ 5
+POLLFREQALERT 5
+HOSTSYNC 15
+DEADTIME 15
+RBWARNTIME 43200
+NOCOMMWARNTIME 300
+FINALDELAY 5</code></pre></div><div class="callout ok"><strong>Criterio de salida de esta fase</strong>Antes de seguir, <code>nut-monitor</code> debe permanecer estable y una prueba FSD manual debe generar sólo el mensaje <code>NUT-SIM</code>, sin apagar ninguna VM ni el host.</div></section>
+
+<section class="section" id="scheduler"><h2>14. Paso 8 — añadir <code>upssched</code></h2><p><code>upsmon</code> detecta eventos. <code>upssched</code> aporta memoria temporal: “si sigue en batería dentro de 180 segundos, ejecuta otra acción; si vuelve la luz, cancela”.</p><h3>Crear el directorio volátil correctamente en cada arranque</h3><div class="codeWrap"><pre><code>cat > /etc/tmpfiles.d/nut-upssched.conf <<'EOF'
+d /run/nut/upssched 0750 nut nut -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/nut-upssched.conf</code></pre></div><h3><code>/etc/nut/upssched.conf</code></h3><div class="codeWrap"><pre><code>CMDSCRIPT /usr/local/sbin/nut-upssched-cmd
+PIPEFN /run/nut/upssched/upssched.pipe
+LOCKFN /run/nut/upssched/upssched.lock
+
+AT ONBATT * EXECUTE onbatt
+AT ONBATT * START-TIMER onbatt-long 180
+AT ONLINE * CANCEL-TIMER onbatt-long
+AT ONLINE * EXECUTE online
+AT LOWBATT * EXECUTE lowbatt
+AT COMMBAD * START-TIMER commbad-long 120
+AT COMMOK * CANCEL-TIMER commbad-long
+AT COMMOK * EXECUTE commok
+AT NOCOMM * EXECUTE nocomm</code></pre></div><h3>Conectar eventos de <code>upsmon</code></h3><div class="codeWrap"><pre><code>NOTIFYCMD /usr/sbin/upssched
+NOTIFYFLAG ONLINE SYSLOG+EXEC
+NOTIFYFLAG ONBATT SYSLOG+EXEC
+NOTIFYFLAG LOWBATT SYSLOG+EXEC
+NOTIFYFLAG COMMBAD SYSLOG+EXEC
+NOTIFYFLAG COMMOK SYSLOG+EXEC
+NOTIFYFLAG NOCOMM SYSLOG+EXEC</code></pre></div><p>La pérdida de comunicación USB no dispara un shutdown automático en esta política: primero se espera 120 s y sólo se registra una alerta. Esto evita apagar por un problema aislado de cable/USB.</p></section>
+
+<section class="section" id="script"><h2>15. Paso 9 — script de decisión completo</h2><p>Este es el script final usado por la automatización. Su detalle importante es que <strong>no confía ciegamente en que el timer venció</strong>: vuelve a leer el estado.</p><div class="codeWrap"><div class="codeTitle">/usr/local/sbin/nut-upssched-cmd</div><pre><code>#!/bin/sh
+
+ACTION="$1"
+UPS="ups-rack@localhost"
+
+case "$ACTION" in
+    onbatt)
+        logger -t NUT-SCHED "UPS entro en bateria. Temporizador de seguridad de 180 segundos iniciado."
+        ;;
+    online)
+        logger -t NUT-SCHED "Energia restaurada. UPS nuevamente ONLINE."
+        ;;
+    onbatt-long)
+        STATUS="$(/usr/bin/upsc "$UPS" ups.status 2>/dev/null || true)"
+        logger -t NUT-SCHED "Temporizador de 180 segundos cumplido. Estado actual UPS: ${STATUS:-DESCONOCIDO}"
+        case "$STATUS" in
+            *OB*)
+                logger -t NUT-SCHED "UPS sigue en bateria despues de 180 segundos. Solicitando FSD a NUT."
+                /usr/sbin/upsmon -c fsd
+                ;;
+            *OL*)
+                logger -t NUT-SCHED "FSD cancelado: UPS ya esta ONLINE."
+                ;;
+            *)
+                logger -t NUT-SCHED "ADVERTENCIA: estado UPS desconocido. No se ejecuta FSD por temporizador."
+                ;;
+        esac
+        ;;
+    lowbatt)
+        logger -t NUT-SCHED "EMERGENCIA: UPS reporta LOWBATT. Solicitando FSD inmediato."
+        /usr/sbin/upsmon -c fsd
+        ;;
+    commbad-long)
+        logger -t NUT-SCHED "ALERTA: comunicacion con UPS perdida durante 120 segundos."
+        ;;
+    commok)
+        logger -t NUT-SCHED "Comunicacion con UPS restaurada."
+        ;;
+    nocomm)
+        logger -t NUT-SCHED "ALERTA: UPS no disponible para NUT."
+        ;;
+    *)
+        logger -t NUT-SCHED "Evento desconocido recibido: $ACTION"
+        ;;
+esac
+exit 0</code></pre></div><div class="codeWrap"><pre><code>install -o root -g nut -m 0750 configs/nut-upssched-cmd /usr/local/sbin/nut-upssched-cmd
+sh -n /usr/local/sbin/nut-upssched-cmd</code></pre></div><div class="callout ok"><strong>Diseño fail-safe</strong>Si la lectura de estado falla o devuelve algo que no contiene OB/OL, el timer no dispara FSD. LOWBATT sigue teniendo su ruta de emergencia independiente.</div></section>
+
+<section class="section" id="proxmox"><h2>16. Paso 10 — ordenar el apagado de VM y LXC</h2><p>Proxmox usa el <strong>startup order</strong> para el arranque y detiene en orden inverso. Por eso el componente que debe apagarse al final recibe el número de orden más bajo.</p><div class="table"><table><thead><tr><th>Orden de arranque</th><th>Rol genérico</th><th>Timeout</th><th>Orden de apagado</th></tr></thead><tbody><tr><td>10</td><td>VM de almacenamiento / NAS</td><td>180 s</td><td>Último guest</td></tr><tr><td>20</td><td>Servicio base 1</td><td>60 s</td><td>6.º</td></tr><tr><td>30</td><td>Servicio base 2</td><td>60 s</td><td>5.º</td></tr><tr><td>40</td><td>Aplicación 1</td><td>60 s</td><td>4.º</td></tr><tr><td>50</td><td>Aplicación 2</td><td>60 s</td><td>3.º</td></tr><tr><td>60</td><td>Proxy / frontend</td><td>60 s</td><td>2.º</td></tr><tr><td>70</td><td>Servicio prescindible</td><td>60 s</td><td>1.º</td></tr></tbody></table></div><div class="codeWrap"><pre><code># EJEMPLOS: reemplaza los placeholders por tus IDs reales.
+qm set <VMID_NAS> -startup order=10,up=90,down=180
+pct set <CTID_SERVICIO_1> -startup order=20,up=5,down=60
+pct set <CTID_SERVICIO_2> -startup order=30,up=5,down=60
+pct set <CTID_SERVICIO_3> -startup order=40,up=5,down=60
+pct set <CTID_SERVICIO_4> -startup order=50,up=5,down=60
+pct set <CTID_SERVICIO_5> -startup order=60,up=5,down=60
+pct set <CTID_SERVICIO_6> -startup order=70,up=5,down=60</code></pre></div><h3>Validar una VM con QEMU Guest Agent</h3><div class="codeWrap"><pre><code>qm guest cmd <VMID_NAS> ping
+qm guest cmd <VMID_NAS> get-osinfo</code></pre></div><p>Para una VM de almacenamiento conviene un timeout mayor porque puede necesitar cerrar datasets, servicios y escrituras pendientes antes de apagarse.</p><div class="callout warn"><strong>Edición pública</strong>Los VMID/CTID y nombres de servicios concretos del laboratorio original fueron retirados. Los placeholders hacen que el ejemplo sea reproducible sin publicar el inventario interno.</div></section>
+
+<section class="section" id="produccion"><h2>17. Paso 11 — pasar a producción</h2><p>Sólo después de superar todas las pruebas simuladas cambia el comando de apagado:</p><div class="codeWrap"><pre><code># /etc/nut/upsmon.conf
+SHUTDOWNCMD "/usr/bin/systemctl poweroff"</code></pre></div><p>Mantén los mismos eventos de <code>upssched</code>. La política queda:</p><div class="grid"><article class="card w6"><h3>Corte normal</h3><p>ONBATT → espera 180 s → vuelve a comprobar OB → FSD → apagado.</p></article><article class="card w6"><h3>Batería crítica</h3><p>LOWBATT → FSD inmediato. No se espera el timer.</p></article></div><h3>Reiniciar y comprobar</h3><div class="codeWrap"><pre><code>systemctl restart nut-server
+systemctl restart nut-monitor
+systemctl is-active nut-driver@ups-rack.service nut-server nut-monitor
+upsc ups-rack@localhost ups.status</code></pre></div></section>
+
+<section class="section" id="nokill"><h2>18. Política eléctrica — apagar Proxmox, no la UPS</h2><div class="codeWrap"><pre><code># /etc/nut/upsmon.conf
+SHUTDOWNCMD "/usr/bin/systemctl poweroff"
+# Deliberadamente NO existe POWERDOWNFLAG
+
+# /etc/nut/ups.conf
+sdorder = -1</code></pre></div><p>El resultado deseado es que el servidor deje de consumir batería, pero que la UPS siga entregando AC a equipos como router, switch, AP y ONT/módem (si también están conectados a ella).</p><div class="callout warn"><strong>Red local no significa Internet</strong>Mantener router/switch/AP encendidos conserva LAN y Wi‑Fi. Para tener salida a Internet durante el apagón, también debe seguir alimentado el equipo del ISP y el proveedor debe mantener servicio aguas arriba.</div></section>
+
+<section class="section" id="pruebas"><h2>19. Plan de pruebas progresivas</h2><div class="table"><table><thead><tr><th>Etapa</th><th>Esperado</th><th>Prohibido / alarma</th></tr></thead><tbody><tr><td>Lectura en red</td><td><code>ups.status: OL</code></td><td>Errores USB/driver</td></tr><tr><td>Microcorte 10–20 s</td><td>ONBATT → ONLINE; timer cancelado</td><td>FSD</td></tr><tr><td>Timer de laboratorio</td><td>Evento largo → script de simulación</td><td>Poweroff real</td></tr><tr><td>FSD manual con simulación</td><td>Journal muestra NUT-SIM</td><td>Guests apagados</td></tr><tr><td>Automático con simulación</td><td>OB → timer → OB verificado → FSD → NUT-SIM</td><td>Poweroff</td></tr><tr><td>Producción</td><td>180 s → FSD → guests → host OFF</td><td>Killpower de UPS</td></tr></tbody></table></div><h3>Tres terminales útiles durante la prueba</h3><div class="grid"><article class="card w6"><h3>Eventos NUT</h3><div class="codeWrap"><pre><code>journalctl -u nut-monitor -f</code></pre></div></article><article class="card w6"><h3>Script scheduler</h3><div class="codeWrap"><pre><code>journalctl -t NUT-SCHED -f</code></pre></div></article><article class="card w12"><h3>Estado en tiempo real</h3><div class="codeWrap"><pre><code>watch -n 2 'upsc ups-rack@localhost | grep -E "battery.charge|battery.runtime|ups.load|ups.status|input.voltage|output.voltage"'</code></pre></div></article></div><p>Si tu terminal remota usa un terminfo no instalado en el host, una solución temporal común es:</p><div class="codeWrap"><pre><code>export TERM=xterm-256color</code></pre></div></section>
+
+<section class="section" id="fsd"><h2>20. FSD controlado y recuperación de laboratorio</h2><p>Con <code>SHUTDOWNCMD</code> todavía apuntando al script de simulación, puede probarse:</p><div class="codeWrap"><pre><code>runuser -u nut -- /usr/sbin/upsmon -c fsd</code></pre></div><p>El journal debería mostrar que NUT recibió el FSD y ejecutó el shutdown automático, pero en lugar de apagar se ejecutará <code>NUT-SIM</code>.</p><h3>Limpiar el estado FSD después de una prueba</h3><div class="codeWrap"><pre><code>systemctl stop nut-monitor
+rm -f /run/nut/killpower
+systemctl restart nut-server
+sleep 3
+upsc ups-rack@localhost ups.status
+# Debe volver a OL si hay red
+systemctl restart nut-monitor</code></pre></div><div class="callout danger"><strong>No hagas esta prueba después de cambiar a poweroff real salvo que quieras apagar el host</strong>Una vez que <code>SHUTDOWNCMD</code> es <code>systemctl poweroff</code>, FSD es una orden de apagado real.</div></section>
+
+<section class="section" id="diagnostico"><h2>21. Diagnóstico y solución de problemas</h2><div class="table"><table><thead><tr><th>Síntoma</th><th>Causa probable</th><th>Qué comprobar</th></tr></thead><tbody><tr><td><code>insufficient permissions</code></td><td>udev/grupo nut</td><td>Reglas, trigger y propietario del dispositivo USB.</td></tr><tr><td><code>No matching HID UPS found</code></td><td>ID/permiso/driver</td><td><code>0463:0001</code>, <code>usbhid-ups</code>, cable y udev.</td></tr><tr><td><code>upsdrvsvcctl ... No service instances</code></td><td>Enumerador NUT/systemd</td><td>Usar directamente <code>systemctl status nut-driver@ups-rack.service</code>.</td></tr><tr><td><code>FSD OL</code> tras una prueba</td><td>FSD quedó enclavado en upsd</td><td>Detener monitor, reiniciar nut-server, comprobar OL.</td></tr><tr><td>VM tarda en cerrar</td><td>Servicios internos / QGA</td><td>QEMU Guest Agent y aumentar timeout <code>down</code>.</td></tr><tr><td>Servidor no enciende cuando vuelve la luz</td><td>La UPS nunca quitó AC</td><td>WOL, IPMI/BMC u otro controlador externo.</td></tr></tbody></table></div><h3>Bloque de diagnóstico rápido</h3><div class="codeWrap"><pre><code>systemctl is-active nut-driver@ups-rack.service nut-server nut-monitor
+upsc ups-rack@localhost
+journalctl -u nut-monitor -n 100 --no-pager
+journalctl -t NUT-SCHED -n 100 --no-pager
+sh -n /usr/local/sbin/nut-upssched-cmd
+qm list
+pct list</code></pre></div></section>
+
+<section class="section" id="mantenimiento"><h2>22. Mantenimiento periódico</h2><div class="check"><label><input type="checkbox">Mensual: comprobar <code>OL</code>, carga y voltajes.</label><label><input type="checkbox">Mensual: verificar los tres servicios NUT.</label><label><input type="checkbox">Después de actualizar NUT/Proxmox: ejecutar <code>sh -n</code> sobre el script.</label><label><input type="checkbox">Después de crear una VM/LXC: asignar startup order y timeout.</label><label><input type="checkbox">Trimestral: microcorte &lt;180 s para validar cancelación.</label><label><input type="checkbox">Semestral o tras cambios importantes: prueba real en ventana controlada.</label><label><input type="checkbox">Revisar batería y temperatura del rack según recomendaciones del fabricante.</label></div><h3>Validación final</h3><div class="codeWrap"><pre><code>echo "===== TIMER ====="
+grep -E 'ONBATT|ONLINE|LOWBATT' /etc/nut/upssched.conf
+
+echo "===== SHUTDOWN ====="
+grep -E '^(SHUTDOWNCMD|POWERDOWNFLAG)' /etc/nut/upsmon.conf || true
+
+echo "===== UPS NO KILLPOWER ====="
+grep 'sdorder' /etc/nut/ups.conf
+
+echo "===== SCRIPT ====="
+sh -n /usr/local/sbin/nut-upssched-cmd && echo "SCRIPT OK"
+
+echo "===== NUT ====="
+systemctl is-active nut-driver@ups-rack.service nut-server nut-monitor
+
+echo "===== UPS ====="
+upsc ups-rack@localhost ups.status</code></pre></div></section>
+
+<section class="section" id="reinicio"><h2>23. Qué pasa cuando vuelve la energía</h2><p>Esta arquitectura tiene una consecuencia importante: como la UPS <strong>no corta físicamente AC</strong> a la fuente del servidor, después del poweroff la PSU puede seguir viendo tensión durante todo el apagón. Por tanto, una opción BIOS del tipo “Restore on AC Power Loss” no necesariamente verá una nueva transición de OFF→ON cuando vuelva la red.</p><div class="grid"><article class="card"><h3>WOL</h3><p>Un router, mini-PC u otro equipo que siga encendido puede enviar Wake-on-LAN.</p></article><article class="card"><h3>IPMI/BMC</h3><p>En hardware de servidor, un BMC permite encender el host fuera de banda.</p></article><article class="card"><h3>Control externo</h3><p>Un dispositivo independiente puede detectar ONLINE y ejecutar la acción de encendido.</p></article></div><div class="callout"><strong>No automatizado en este manual</strong>El apagado seguro está validado; el encendido automático debe diseñarse aparte porque depende del hardware disponible.</div></section>
+
+<section class="section" id="archivos"><h2>24. Archivos incluidos en el ZIP</h2><p>Los archivos de configuración son versiones públicas, sin contraseñas ni identificadores internos.</p><div class="downloads"><a href="configs/nut.conf">nut.conf</a><a href="configs/ups.conf">ups.conf</a><a href="configs/upsd.users.example">upsd.users.example</a><a href="configs/upsmon.conf.example">upsmon.conf.example</a><a href="configs/upssched.conf">upssched.conf</a><a href="configs/nut-upssched.tmpfiles.conf">tmpfiles</a><a href="configs/nut-upssched-cmd">nut-upssched-cmd</a><a href="configs/nut-shutdown-sim.sh">shutdown simulado</a><a href="configs/proxmox-orders.example.sh">orden Proxmox</a><a href="configs/validation.sh">validation.sh</a></div><div class="callout warn"><strong>No copies todo a ciegas</strong>Los IDs USB corresponden al modelo probado; los VMID/CTID son placeholders; y debes revisar rutas, versiones y objetivos antes de aplicar en otro laboratorio.</div></section>
+
+<section class="section" id="privacidad"><h2>25. Política de privacidad para publicar en GitHub</h2><div class="privacy"><div class="shield">🛡️</div><div><p>Esta edición fue preparada específicamente para publicación pública.</p><ul><li>Hostname original → reemplazado por <code>nodo-proxmox</code>.</li><li>VMID/CTID exactos → reemplazados por placeholders.</li><li>Nombres de servicios internos → convertidos en roles genéricos donde no son necesarios.</li><li>Contraseñas → nunca incluidas; se usa <code>&lt;PASSWORD_UPSMON&gt;</code>.</li><li>Capturas que mostraban hostname/inventario → excluidas del paquete público.</li><li>IPs internas → no incluidas.</li><li>Se conserva sólo una captura de métricas que no expone el hostname.</li></ul></div></div><div class="callout ok"><strong>Resultado</strong>El manual explica el procedimiento completo sin publicar la identidad del servidor ni el mapa exacto del homelab original.</div></section>
+
+<section class="section" id="referencias"><h2>26. Referencias técnicas</h2><ul><li><a href="https://networkupstools.org/historic/v2.8.1/docs/man/usbhid-ups.html" target="_blank" rel="noopener">NUT 2.8.1 · usbhid-ups</a></li><li><a href="https://networkupstools.org/docs/man/upssched.html" target="_blank" rel="noopener">NUT · upssched</a></li><li><a href="https://networkupstools.org/docs/man/upsmon.html" target="_blank" rel="noopener">NUT · upsmon</a></li><li><a href="https://networkupstools.org/docs/user-manual.chunked/ar01s06.html" target="_blank" rel="noopener">NUT · configuration notes / sdorder</a></li><li><a href="https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf" target="_blank" rel="noopener">Proxmox VE Administration Guide</a></li><li><a href="https://pve.proxmox.com/pve-docs/pct.1.html" target="_blank" rel="noopener">Proxmox · pct startup/shutdown order</a></li><li><a href="https://proxmenux.com/es/docs/monitor/dashboard/hardware/" target="_blank" rel="noopener">ProxMenux · hardware / UPS Status</a></li></ul><p class="muted">La implementación de laboratorio que dio origen a esta guía fue validada con NUT 2.8.1 y una Hikvision DS-UPS2000-R. En otras versiones pueden existir diferencias de nombres de servicio o comportamiento; valida siempre en tu propia instalación.</p></section>
+</main><footer class="footer">Manual público · Proxmox + Hikvision DS-UPS2000-R + NUT · HTML/CSS/JS sin dependencias externas · Preparado para GitHub Pages.</footer></div></div><script src="assets/app.js"></script></body></html>

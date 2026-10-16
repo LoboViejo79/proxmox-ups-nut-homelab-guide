@@ -1,0 +1,5 @@
+# /etc/nut/upsd.users
+# Sustituir <PASSWORD_UPSMON> por una contraseña fuerte, única y local.
+[upsmon]
+    password = <PASSWORD_UPSMON>
+    upsmon primary

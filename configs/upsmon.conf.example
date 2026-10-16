@@ -1,0 +1,26 @@
+# /etc/nut/upsmon.conf
+# Sustituir <PASSWORD_UPSMON> por la MISMA contraseña de upsd.users.
+RUN_AS_USER nut
+
+MONITOR ups-rack@localhost 1 upsmon <PASSWORD_UPSMON> primary
+MINSUPPLIES 1
+
+# PRODUCCIÓN: poweroff real del host. Proxmox detiene antes sus guests.
+SHUTDOWNCMD "/usr/bin/systemctl poweroff"
+
+POLLFREQ 5
+POLLFREQALERT 5
+HOSTSYNC 15
+DEADTIME 15
+RBWARNTIME 43200
+NOCOMMWARNTIME 300
+FINALDELAY 5
+
+# Deliberadamente NO se define POWERDOWNFLAG: este diseño no apaga la UPS.
+NOTIFYCMD /usr/sbin/upssched
+NOTIFYFLAG ONLINE SYSLOG+EXEC
+NOTIFYFLAG ONBATT SYSLOG+EXEC
+NOTIFYFLAG LOWBATT SYSLOG+EXEC
+NOTIFYFLAG COMMBAD SYSLOG+EXEC
+NOTIFYFLAG COMMOK SYSLOG+EXEC
+NOTIFYFLAG NOCOMM SYSLOG+EXEC

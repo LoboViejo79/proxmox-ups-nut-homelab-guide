@@ -1,0 +1,50 @@
+#!/bin/sh
+# /usr/local/sbin/nut-upssched-cmd
+# Script final de decisión. El FSD sólo se solicita tras verificar que la UPS
+# continúa realmente en batería, o cuando NUT informa LOWBATT.
+
+ACTION="$1"
+UPS="ups-rack@localhost"
+
+case "$ACTION" in
+    onbatt)
+        logger -t NUT-SCHED "UPS entro en bateria. Temporizador de seguridad de 180 segundos iniciado."
+        ;;
+    online)
+        logger -t NUT-SCHED "Energia restaurada. UPS nuevamente ONLINE."
+        ;;
+    onbatt-long)
+        STATUS="$(/usr/bin/upsc "$UPS" ups.status 2>/dev/null || true)"
+        logger -t NUT-SCHED "Temporizador de 180 segundos cumplido. Estado actual UPS: ${STATUS:-DESCONOCIDO}"
+        case "$STATUS" in
+            *OB*)
+                logger -t NUT-SCHED "UPS sigue en bateria despues de 180 segundos. Solicitando FSD a NUT."
+                /usr/sbin/upsmon -c fsd
+                ;;
+            *OL*)
+                logger -t NUT-SCHED "FSD cancelado: UPS ya esta ONLINE."
+                ;;
+            *)
+                logger -t NUT-SCHED "ADVERTENCIA: estado UPS desconocido. No se ejecuta FSD por temporizador."
+                ;;
+        esac
+        ;;
+    lowbatt)
+        logger -t NUT-SCHED "EMERGENCIA: UPS reporta LOWBATT. Solicitando FSD inmediato."
+        /usr/sbin/upsmon -c fsd
+        ;;
+    commbad-long)
+        logger -t NUT-SCHED "ALERTA: comunicacion con UPS perdida durante 120 segundos."
+        ;;
+    commok)
+        logger -t NUT-SCHED "Comunicacion con UPS restaurada."
+        ;;
+    nocomm)
+        logger -t NUT-SCHED "ALERTA: UPS no disponible para NUT."
+        ;;
+    *)
+        logger -t NUT-SCHED "Evento desconocido recibido: $ACTION"
+        ;;
+esac
+
+exit 0
